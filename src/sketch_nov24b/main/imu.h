@@ -9,3 +9,6 @@ public:
 };
 
 extern IMUClass IMU;
+
+// 7-sample averaging helper (implemented in imu.cpp)
+float sampleAverage(float newSample);
