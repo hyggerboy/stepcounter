@@ -1,8 +1,57 @@
 #include "imu.h"
 #include <Wire.h>
+#include <math.h>
+#include <Arduino.h>
+
+
+// From imu.cpp
+float sampleAverage(float newSample);
+
+// Your peak detector
+struct PeakDetector {
+  float thresh;
+  size_t minDist;
+  size_t sinceLast = 0;
+  float prev2 = 0.0f, prev1 = 0.0f;
+
+  PeakDetector(float thresh_, float fs, float minSeconds)
+      : thresh(thresh_), minDist((size_t)(minSeconds * fs + 0.5f)) {}
+
+  bool update(float x) {
+    bool peak = false;
+
+    if (sinceLast >= minDist) {
+      if (prev1 > thresh && prev1 > prev2 && prev1 >= x) {
+        peak = true;
+        sinceLast = 0;
+      }
+    }
+
+    prev2 = prev1;
+    prev1 = x;
+
+    if (sinceLast < 1000000) sinceLast++;
+
+    return peak;
+  }
+};
+
+// ----- signal processing config -----
+
+// Approx sampling rate (matches IMU.accelerationAvailable target)
+constexpr float FS_HZ = 100.0f;
+
+// Low-pass cutoff for smoothing (tune this!)
+constexpr float FC_HZ = 5.0f;
+
+// Globals for filter and peak detector
+float alpha;           // low-pass filter coefficient
+float z_f = 0.0f;      // filtered magnitude
+
+// Threshold ~ 1 g, min distance between peaks ~ 0.3 s
+PeakDetector peakDet(1.05f, FS_HZ, 0.3f);
 
 #define IMU_ADDR 0x6B    // LSM9DS1 accel/gyro I2C address
-
 
 IMUClass IMU;
 
@@ -38,11 +87,9 @@ bool IMUClass::begin() {
   Serial.print("WHO_AM_I = 0x");
   Serial.println(who, HEX);
 
-  // If this prints something weird (not 0x68), address/bus is wrong.
   if (who != 0x68) {
     Serial.println("Unexpected WHO_AM_I, IMU may not be LSM9DS1 or addr/bus wrong.");
-    // you can either return false here, or just continue
-    // return false;
+    // return false;   // uncomment if you want to fail hard
   }
 
   // Turn on accelerometer:
@@ -56,8 +103,8 @@ bool IMUClass::begin() {
 }
 
 bool IMUClass::accelerationAvailable() {
-  // pick the rate you want to sample at:
-  const float targetHz = 100.0f;             // e.g. 100 Hz
+  // Time-based sampling gate (e.g. 100 Hz)
+  const float targetHz = 100.0f;
   const uint32_t period_us = (uint32_t)(1000000.0f / targetHz + 0.5f);
 
   static uint32_t last_us = 0;
@@ -65,12 +112,11 @@ bool IMUClass::accelerationAvailable() {
 
   if (now - last_us >= period_us) {
     last_us = now;
-    return true;      // "ok, time to take one sample"
+    return true;
   }
 
   return false;
 }
-
 
 bool IMUClass::readAcceleration(float &ax, float &ay, float &az) {
   uint8_t buf[6];
@@ -90,11 +136,26 @@ bool IMUClass::readAcceleration(float &ax, float &ay, float &az) {
 
   return true;
 }
- 
-void sampleavage(bool data_avilibal, float data){
-  float sum_of_data;
-  if (data_avilibal){
-    sum_of_data = sum_of_data + data;
+
+// ---------- 7-sample average helper ----------
+// Call this with a new sample each time; it returns the current average.
+// Here it's a simple "block" average over 7 samples, then it resets.
+float sampleAverage(float newSample) {
+  static float sum_of_data = 0.0f;
+  static uint8_t cnt = 0;
+
+  sum_of_data += newSample;
+  cnt++;
+
+  if (cnt < 7) {
+    // not enough samples yet, average over what we have
+    return sum_of_data / cnt;
+  } else {
+    // full 7-sample average
+    float avg = sum_of_data / 7.0f;
+    // reset for the next block of 7 samples
+    sum_of_data = 0.0f;
+    cnt = 0;
+    return avg;
   }
-  
 }
